@@ -1,4 +1,4 @@
 streamlit
-google-generativeai>=0.8.0,<1.0.0
+google-generativeai
 pypdf
 python-dotenv

@@ -370,6 +370,51 @@ Order and priority:
 4. Soft skills explicitly named (not implied)
 No duplicates. Title Case. Max 20 entries. Follow this order strictly.
 
+When extracting keywords_present,
+decompose meaningful compound phrases into their component keywords.
+
+Examples:
+
+Customer Retention Crisis
+
+becomes
+
+Customer Retention Crisis
+Customer
+Retention
+
+SaaS Enterprise Retention Investigation
+
+becomes
+
+SaaS Enterprise Retention Investigation
+SaaS
+Enterprise
+Retention
+Investigation
+
+Customer Segmentation
+
+becomes
+
+Customer Segmentation
+Customer
+Segmentation
+
+Power BI Dashboard
+
+becomes
+
+Power BI Dashboard
+Power BI
+Dashboard
+
+The original compound phrase MUST still be preserved.
+
+Component keywords are added in addition to—not instead of—the original phrase.
+
+This decomposition exists solely to improve downstream keyword matching.
+
 CURRENT ROLE AND COMPANY:
 Determine from the most recent active role (most recent start date).
 If multiple roles show "Present" or overlapping end dates: return "Unknown" for both.
@@ -1061,6 +1106,49 @@ NEVER introduce a new noun (company, tool, methodology) without citing
   which part of the resume proves the candidate has it.
 NEVER recommend adding a keyword from the JD's missing_skills list
   unless the resume contains direct evidence of that skill.
+Skills section recommendations may only ADD a skill if it appears
+verbatim (or as a direct synonym) in either:
+
+• the resume’s Skills section
+OR
+• explicitly inside a project description.
+
+Do NOT promote inferred concepts into the Skills section.
+
+If an activity implies a concept, that concept may ONLY appear inside
+project_section_rewrites.
+
+Examples:
+
+WRONG:
+Resume discusses engagement collapse.
+Add “Funnel Analysis” to Skills.
+
+RIGHT:
+Mention funnel analysis inside the rewritten project bullet only.
+
+WRONG:
+Resume discusses experimentation.
+Add “Experiment Evaluation” to Skills.
+
+RIGHT:
+Keep experimentation wording inside the project rewrite.
+
+WRONG:
+Resume has “Stakeholder Reporting” in Skills.
+Add “Stakeholder Communication” to Skills.
+
+RIGHT:
+Only add “Stakeholder Communication” if that exact phrase
+appears somewhere in the resume.
+
+The decision rule is:
+
+“Can I find this exact word (or direct synonym) somewhere in the resume?”
+
+If NO,
+do not recommend adding it to skills_section_recommendations.
+
 NEVER rewrite a bullet so heavily that its meaning changes.
 NEVER produce a recommendation that requires the user to lie.
 
