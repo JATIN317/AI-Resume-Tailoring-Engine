@@ -1,13 +1,17 @@
-# app.py — AI Resume Tailoring Engine (V3)
-# Based on appv2.py. V3 additions:
-#   1. Improvement Opportunities section (gap_analysis.improvement_opportunities)
-#   2. JD Understanding collapsed expander (all 9 jd_analysis fields)
-#   3. Match Score Simulator collapsed expander (heuristic, not predictive model)
-#   4. Keyword Optimization Recommendations section (tailoring_output.keyword_optimization_recommendations)
-#   5. Experience Gap Detail expander inside Strategic Positioning Summary
-#   6. Unified Resume Improvement Plan (header + chips + cards, after Pipeline)
-#   7. Removed truncation in _concerns_html and _keyword_coverage_html
-# All pipeline, session state, CSS, and backend behavior unchanged from appv2.py.
+# app.py — AI Resume Tailoring Engine (Production Polish v3)
+# UI POLISH PASS — presentation only. Zero backend changes.
+#
+# ROOT CAUSE FIX: All HTML is built as single-line string concatenations.
+# CommonMark treats lines with ≥4 leading spaces as code blocks, which caused
+# the AI Processing Pipeline and Step Progress to render as raw HTML source.
+#
+# Preserved verbatim from approved version:
+#   load_dotenv() before set_page_config()
+#   All 8 session_state keys and setdefault/setitem pattern
+#   PDF change detection: name:size signature
+#   analyze_clicked disabled condition
+#   Full try/except pipeline (6 exception types, correct order)
+#   All 4 agent calls in order; analysis_complete = True after Agent 4
 
 from dotenv import load_dotenv
 import streamlit as st
@@ -67,14 +71,13 @@ def _exp_indicator(severity: str):
 
 def _priority_badge(level: str) -> str:
     lc = (level or "").lower()
-    if lc == "high":     bg, lbl = "#D63031", "HIGH PRIORITY"
+    if lc == "high":   bg, lbl = "#D63031", "HIGH PRIORITY"
     elif lc == "medium": bg, lbl = "#E17055", "MEDIUM PRIORITY"
-    else:                bg, lbl = "#636E72", "LOW PRIORITY"
+    else:              bg, lbl = "#636E72", "LOW PRIORITY"
     return (f'<span style="background:{bg};color:white;font-size:10px;font-weight:700;'
             f'padding:3px 10px;border-radius:10px;letter-spacing:0.5px;">{lbl}</span>')
 
 def _est_chip(level: str) -> str:
-    # Kept for potential future use; not currently called in V3 card rendering.
     pct = _impact_pct(level)
     return (f'<span style="background:#F0FFF4;color:#00B894;font-size:11px;font-weight:700;'
             f'padding:3px 10px;border-radius:10px;">↑ Est. +{pct}%</span>')
@@ -83,7 +86,7 @@ def _get_verified_chips(gap: dict) -> str:
     """Cross-reference JD must-haves with resume keywords for concise chip labels."""
     jd_a  = st.session_state.get("jd_analysis")  or {}
     res_a = st.session_state.get("resume_analysis") or {}
-    must_haves   = jd_a.get("must_have_skills") or []
+    must_haves = jd_a.get("must_have_skills") or []
     good_to_have = jd_a.get("good_to_have_skills") or []
     res_pool = set(k.lower() for k in (
         (res_a.get("keywords_present") or []) +
@@ -92,6 +95,7 @@ def _get_verified_chips(gap: dict) -> str:
     ))
     verified = [s for s in must_haves if s.lower() in res_pool]
     verified += [s for s in good_to_have if s.lower() in res_pool and s not in verified]
+    # Fallback: parse strength_areas for skill names
     if not verified:
         for item in (gap.get("strength_areas") or [])[:6]:
             for sep in [" — ", " present", " with ", " (", " is "]:
@@ -111,12 +115,12 @@ def _get_verified_chips(gap: dict) -> str:
     )
 
 def _concerns_html(gap: dict) -> str:
-    """Concerns bullets — V3: ALL items, full text, no truncation (removed [:4], [:3], [:50], [:72] limits)."""
+    """Concise Hiring Manager Concerns bullets."""
     missing = gap.get("missing_skills") or []
     weak    = gap.get("weak_sections")  or []
     html = ""
-    for skill in missing:  # V3: no item limit
-        clean = skill.split(" — ")[0].strip()  # V3: no text truncation
+    for skill in missing[:4]:
+        clean = skill.split(" — ")[0].strip()[:50]
         html += (
             '<div style="display:flex;gap:8px;padding:7px 0;border-bottom:1px solid #F4F6FB;">'
             '<span style="flex-shrink:0;color:#D63031;">❌</span>'
@@ -124,11 +128,12 @@ def _concerns_html(gap: dict) -> str:
             f'<span style="font-size:13px;color:#D63031;">{_esc(clean)}</span></div>'
             '</div>'
         )
-    for section in weak:  # V3: no item limit, no text truncation
+    for section in weak[:3]:
+        clean = section[:72] + ("…" if len(section) > 72 else "")
         html += (
             '<div style="display:flex;gap:8px;padding:7px 0;border-bottom:1px solid #F4F6FB;">'
             '<span style="flex-shrink:0;color:#E17055;">⚠️</span>'
-            f'<span style="font-size:13px;color:#636E72;line-height:1.4;word-wrap:break-word;">{_esc(section)}</span>'
+            f'<span style="font-size:13px;color:#636E72;line-height:1.4;">{_esc(clean)}</span>'
             '</div>'
         )
     if not html:
@@ -136,20 +141,20 @@ def _concerns_html(gap: dict) -> str:
     return html
 
 def _keyword_coverage_html(gap: dict) -> str:
-    """ATS Keyword Coverage card body — V3: ALL missing_keywords shown (removed [:8] limit)."""
+    """ATS Keyword Coverage card body — matched vs missing counts + breakdown bars."""
     breakdown  = gap.get("match_score_breakdown") or {}
     missing_kw = gap.get("missing_keywords") or []
     jd_a  = st.session_state.get("jd_analysis")  or {}
     res_a = st.session_state.get("resume_analysis") or {}
-    all_kw   = jd_a.get("keywords_ranked") or []
+    all_kw  = jd_a.get("keywords_ranked") or []
     res_pool = set(k.lower() for k in (res_a.get("keywords_present") or []))
     matched_kw = [k for k in all_kw if k.lower() in res_pool]
     mc, msc = len(matched_kw), len(missing_kw)
     bars = [
-        ("Must-Have Skills",  breakdown.get("must_have_skills_score", 0),    "#5B4CF5"),
-        ("Good-to-Have",      breakdown.get("good_to_have_skills_score", 0), "#00B894"),
-        ("Experience",        breakdown.get("relevant_experience_score", 0),  "#E17055"),
-        ("Keyword Coverage",  breakdown.get("keyword_coverage_score", 0),    "#5B4CF5"),
+        ("Must-Have Skills",  breakdown.get("must_have_skills_score", 0),   "#5B4CF5"),
+        ("Good-to-Have",      breakdown.get("good_to_have_skills_score", 0),"#00B894"),
+        ("Experience",        breakdown.get("relevant_experience_score", 0), "#E17055"),
+        ("Keyword Coverage",  breakdown.get("keyword_coverage_score", 0),   "#5B4CF5"),
     ]
     counts = (
         '<div style="display:flex;gap:12px;margin-bottom:16px;">'
@@ -181,7 +186,7 @@ def _keyword_coverage_html(gap: dict) -> str:
             f'<span style="display:inline-block;background:#FFF0F0;color:#D63031;'
             f'border:1px solid #FFCDD2;padding:2px 8px;border-radius:10px;'
             f'font-size:11px;margin:2px;">{_esc(k)}</span>'
-            for k in missing_kw  # V3: no [:8] limit — show ALL missing keywords
+            for k in missing_kw[:8]
         )
         chips = (
             '<div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;'
@@ -190,19 +195,9 @@ def _keyword_coverage_html(gap: dict) -> str:
         )
     return counts + bars_html + chips
 
-def _jd_list_html(items: list) -> str:
-    """Render a list of strings as HTML rows for JD Understanding section. No truncation."""
-    if not items:
-        return '<div style="font-size:13px;color:#9B9B9B;font-style:italic;padding:4px 0;">None listed.</div>'
-    return "".join(
-        f'<div style="font-size:13px;color:#2D3436;padding:4px 0;border-bottom:1px solid #F4F6FB;'
-        f'line-height:1.5;word-wrap:break-word;">• {_esc(item)}</div>'
-        for item in items
-    )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CSS INJECTION — verbatim from appv2.py, no changes
+# CSS INJECTION — all design tokens live here
 # ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
@@ -240,7 +235,7 @@ hr{border:none;border-top:1px solid #E8ECF0;margin:16px 0;}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HEADER BAR — verbatim from appv2.py
+# HEADER BAR
 # ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown(
@@ -255,9 +250,8 @@ st.markdown(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# STEP PROGRESS BAR — verbatim from appv2.py
-# Gate: analysis_complete == True
-# Single-line HTML string concatenation (Streamlit rendering constraint).
+# STEP PROGRESS (gated: analysis_complete) — placed before inputs per design
+# FIX: single-line string concat — no 4-space indentation in HTML
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"]:
@@ -293,8 +287,8 @@ if st.session_state["analysis_complete"]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# INPUT AREA — verbatim from appv2.py
-# Gate: always visible
+# SECTION 1 — INPUT AREA
+# Logic: unchanged. Visual: polished card wrapper + upload state + time hint.
 # ═══════════════════════════════════════════════════════════════════════════
 
 st.markdown(
@@ -357,7 +351,7 @@ with col_btn:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PDF CHANGE DETECTION — verbatim from appv2.py
+# PDF CHANGE DETECTION — PRESERVED EXACTLY
 # ═══════════════════════════════════════════════════════════════════════════
 
 if uploaded_file is not None:
@@ -371,7 +365,7 @@ if uploaded_file is not None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PIPELINE — verbatim from appv2.py
+# PIPELINE — PRESERVED EXACTLY (spinner messages updated per UX spec)
 # Exception order: ValueError → LLMParseError → LLMValidationError →
 #                  ResourceExhausted → GoogleAPIError → Exception
 # ═══════════════════════════════════════════════════════════════════════════
@@ -426,7 +420,7 @@ if analyze_clicked:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HERO RECOMMENDATION — verbatim from appv2.py
+# SECTION 3 — APPLICATION RECOMMENDATION (Hero)
 # Gate: gap_analysis is not None
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -446,7 +440,7 @@ if st.session_state["gap_analysis"] is not None:
 
     badge_cls, action_bg, action_fg, action_text, rec_line = _fit_colors(rec)
     exp_text, exp_color = _exp_indicator(severity)
-    chips_html   = _get_verified_chips(gap)
+    chips_html  = _get_verified_chips(gap)
     factors_html = "".join(
         '<div style="padding:7px 0;border-bottom:1px solid #F4F6FB;color:#636E72;font-size:13px;">'
         f'→&nbsp;&nbsp;{_esc(s)}</div>'
@@ -509,9 +503,8 @@ if st.session_state["gap_analysis"] is not None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# STRATEGIC POSITIONING SUMMARY
+# STRATEGIC POSITIONING SUMMARY — moved here (immediately after Hero)
 # Gate: analysis_complete == True
-# V3 changes: subtitle updated; experience_gap expander added below strategy list.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
@@ -529,133 +522,51 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
         st.markdown(
             '<div class="card" style="margin-top:8px;">'
             '<div class="section-header" style="margin-bottom:4px;">🗺 Strategic Positioning Summary</div>'
-            # V3: subtitle updated to focus on candidacy presentation
-            '<div class="section-sub">How to present your candidacy for this specific role</div>'
+            '<div class="section-sub">Key approach for this specific application</div>'
             + numbered +
             '</div>',
             unsafe_allow_html=True,
         )
 
-    # V3 addition: Experience Gap Detail collapsed expander
-    # Shows all four experience_gap fields (required, candidate, severity, reason).
-    exp_gap = (st.session_state.get("gap_analysis") or {}).get("experience_gap") or {}
-    if exp_gap and any(v for v in exp_gap.values() if v is not None and str(v).strip() not in ("", "false", "False")):
-        with st.expander("📊 Experience Gap Detail", expanded=False):
-            sev_val = str(exp_gap.get("severity") or "None")
-            sev_color = {"High": "#D63031", "Medium": "#E17055", "Low": "#00B894", "None": "#00B894"}.get(sev_val, "#636E72")
-            eg1, eg2, eg3 = st.columns(3)
-            with eg1:
-                st.markdown(
-                    '<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Experience Required</div>'
-                    f'<div style="font-size:14px;color:#1A1A2E;font-weight:600;">{_esc(str(exp_gap.get("required") or "—"))}</div></div>',
-                    unsafe_allow_html=True,
-                )
-            with eg2:
-                st.markdown(
-                    '<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Candidate Experience</div>'
-                    f'<div style="font-size:14px;color:#1A1A2E;font-weight:600;">{_esc(str(exp_gap.get("candidate") or "—"))}</div></div>',
-                    unsafe_allow_html=True,
-                )
-            with eg3:
-                st.markdown(
-                    f'<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Severity</div>'
-                    f'<div style="font-size:14px;color:{sev_color};font-weight:700;">{_esc(sev_val)}</div></div>',
-                    unsafe_allow_html=True,
-                )
-            reason = str(exp_gap.get("reason") or "").strip()
-            if reason:
-                st.markdown(
-                    f'<div style="font-size:13px;color:#636E72;margin-top:4px;padding:12px 16px;'
-                    f'background:#F8F9FA;border-radius:8px;line-height:1.6;">{_esc(reason)}</div>',
-                    unsafe_allow_html=True,
-                )
-
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MATCH SCORE SIMULATOR — NEW in V3 (supporting diagnostic, collapsed)
+# RESUME IMPROVEMENT PRIORITY — replaces simulator (no fabricated percentages)
+# Shows priority-grouped count summary. Evidence-based only.
 # Gate: analysis_complete == True
-# Heuristic only: High → +4%, Medium → +2%, Low → +1%
-# These are priority estimates, not model predictions.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
-    with st.expander("📊 Match Score Simulator", expanded=False):
-        _gap_sim = st.session_state["gap_analysis"] or {}
-        _out_sim = st.session_state["tailoring_output"] or {}
-        _base    = _gap_sim.get("match_score", 0)
-        _top3    = (_out_sim.get("priority_actions") or [])[:3]
-
-        # Heuristic only: High → +4%, Medium → +2%, Low → +1%
-        # These are priority estimates, not model predictions.
-        _impact_data = []
-        for _a in _top3:
-            _lvl   = (_a.get("estimated_match_score_impact") or {}).get("level", "Low")
-            _pct   = _impact_pct(_lvl)
-            _label = (_a.get("action") or "")[:22].strip()
-            _impact_data.append((_label, _pct, _lvl))
-
-        _total_gain = sum(p for _, p, _ in _impact_data)
-        _projected  = min(_base + _total_gain, 99)
-        _remaining  = max(100 - _base - _total_gain, 0)
-        _seg_colors = ["#7B6CF8", "#00B894", "#E17055"]
-
-        _bar_segs = (
-            f'<div style="flex:{_base};background:#5B4CF5;display:flex;align-items:center;'
-            f'justify-content:center;color:white;font-size:12px;font-weight:700;min-width:4px;">'
-            + (f"{_base}%" if _base > 8 else "") + '</div>'
+    _all_actions = st.session_state["tailoring_output"].get("priority_actions") or []
+    _high_n  = sum(1 for a in _all_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "High")
+    _med_n   = sum(1 for a in _all_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Medium")
+    _low_n   = sum(1 for a in _all_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Low")
+    _total_n = len(_all_actions)
+    if _total_n > 0:
+        _summary_chips = (
+            (f'<span style="background:#FFEBEE;color:#D63031;border:1px solid #FFCDD2;'
+             f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;margin-right:8px;">'
+             f'🔴 {_high_n} High Impact</span>' if _high_n else '') +
+            (f'<span style="background:#FFF3E0;color:#E17055;border:1px solid #FFE0B2;'
+             f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;margin-right:8px;">'
+             f'🟡 {_med_n} Medium Impact</span>' if _med_n else '') +
+            (f'<span style="background:#F5F5F5;color:#636E72;border:1px solid #E0E0E0;'
+             f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;">'
+             f'⚪ {_low_n} Low Impact</span>' if _low_n else '')
         )
-        _lbl_segs = (
-            f'<div style="flex:{_base};padding-top:4px;">'
-            f'<span style="font-size:11px;color:#636E72;font-weight:600;">Current: {_base}%</span></div>'
-        )
-
-        for _i, (_label, _pct, _lvl) in enumerate(_impact_data):
-            _col = _seg_colors[_i % len(_seg_colors)]
-            _bar_segs += (
-                f'<div style="flex:{_pct};background:{_col};display:flex;align-items:center;'
-                f'justify-content:center;border-left:1px solid rgba(255,255,255,0.4);'
-                f'color:white;font-size:11px;font-weight:700;min-width:4px;">'
-                + (f"+{_pct}%" if _pct > 1 else "") + '</div>'
-            )
-            _lbl_segs += (
-                f'<div style="flex:{_pct};text-align:center;padding-top:4px;">'
-                f'<div style="font-size:10px;color:#636E72;white-space:nowrap;'
-                f'overflow:hidden;text-overflow:ellipsis;max-width:90px;margin:0 auto;">{_esc(_label)}</div>'
-                f'<div style="font-size:11px;color:{_col};font-weight:700;">+{_pct}%</div>'
-                f'</div>'
-            )
-        if _remaining > 0:
-            _bar_segs += f'<div style="flex:{_remaining};background:#E8ECF0;min-width:4px;"></div>'
-            _lbl_segs += f'<div style="flex:{_remaining};"></div>'
-        _bar_segs += (
-            f'<div style="width:56px;background:#2D2A70;display:flex;align-items:center;'
-            f'justify-content:center;color:white;font-size:13px;font-weight:700;flex-shrink:0;">'
-            f'{_projected}%</div>'
-        )
-
         st.markdown(
-            '<div class="card" style="margin-top:4px;">'
-            '<div class="section-header" style="margin-bottom:4px;">Match Score Simulator</div>'
-            '<div class="section-sub" style="margin-bottom:8px;">Estimated score impact of applying top recommendations</div>'
-            # Heuristic disclaimer — visible to user, per adjusted spec requirement
-            '<div style="font-size:12px;color:#E17055;font-style:italic;margin-bottom:16px;">'
-            'Estimated impact based on recommendation priority. Not a predictive model.</div>'
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
-            f'<span style="font-size:13px;color:#636E72;font-weight:600;">Current: {_base}%</span>'
-            f'<span style="font-size:13px;color:#00B894;font-weight:700;">Projected: {_projected}%</span>'
-            '</div>'
-            f'<div style="display:flex;width:100%;height:44px;border-radius:8px;overflow:hidden;margin-bottom:6px;">{_bar_segs}</div>'
-            f'<div style="display:flex;width:100%;">{_lbl_segs}</div>'
+            '<div style="margin-top:8px;margin-bottom:4px;">'
+            '<div class="section-header">Resume Improvement Priority</div>'
+            '<div class="section-sub">Ranked by expected impact on recruiter and ATS evaluation</div>'
+            f'<div style="margin-bottom:8px;">{_summary_chips}</div>'
             '</div>',
             unsafe_allow_html=True,
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# THREE COLUMN ANALYSIS — from appv2.py
+# THREE COLUMN ANALYSIS
 # Gate: gap_analysis is not None
-# V3 change: _concerns_html and _keyword_coverage_html now show ALL items
-#            (truncation limits removed in utility functions above).
+# FIX: all HTML built as single-line strings via helper functions
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["gap_analysis"] is not None:
@@ -664,6 +575,7 @@ if st.session_state["gap_analysis"] is not None:
 
     col_l, col_c, col_r = st.columns(3)
 
+    # LEFT — Why You're a Great Fit
     with col_l:
         bullets = "".join(
             '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #F4F6FB;'
@@ -682,6 +594,7 @@ if st.session_state["gap_analysis"] is not None:
             unsafe_allow_html=True,
         )
 
+    # CENTER — Hiring Manager Concerns
     with col_c:
         concerns = _concerns_html(gap)
         st.markdown(
@@ -693,6 +606,7 @@ if st.session_state["gap_analysis"] is not None:
             unsafe_allow_html=True,
         )
 
+    # RIGHT — ATS Keyword Coverage
     with col_r:
         kw_html = _keyword_coverage_html(gap)
         st.markdown(
@@ -706,104 +620,18 @@ if st.session_state["gap_analysis"] is not None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# IMPROVEMENT OPPORTUNITIES — NEW in V3 (core product section)
-# Gate: gap_analysis is not None
-# Source: gap_analysis.improvement_opportunities — ALL items, no truncation
-# ═══════════════════════════════════════════════════════════════════════════
-
-if st.session_state["gap_analysis"] is not None:
-    imp_opps = (st.session_state["gap_analysis"].get("improvement_opportunities") or [])
-    if imp_opps:
-        imp_items = "".join(
-            '<div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #F4F6FB;">'
-            f'<div style="width:24px;height:24px;border-radius:50%;background:#FFF3E0;color:#E17055;'
-            f'display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">{i}</div>'
-            f'<div style="font-size:14px;color:#1A1A2E;line-height:1.6;word-wrap:break-word;">{_esc(item)}</div>'
-            '</div>'
-            for i, item in enumerate(imp_opps, start=1)
-        )
-        st.markdown(
-            '<div class="card card-orange-border">'
-            '<div class="section-header" style="margin-bottom:4px;">💡 Improvement Opportunities</div>'
-            '<div class="section-sub">Specific areas where your application can be strengthened</div>'
-            + imp_items +
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("No additional improvement opportunities identified.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# JD UNDERSTANDING — NEW in V3 (supporting diagnostic, collapsed)
-# Gate: jd_analysis is not None
-# Shows all 9 fields from jd_analysis. No truncation.
-# ═══════════════════════════════════════════════════════════════════════════
-
-if st.session_state["jd_analysis"] is not None:
-    with st.expander("📋 How the AI Understood This Job Description", expanded=False):
-        _jd = st.session_state["jd_analysis"] or {}
-        # Row 1: three summary metrics
-        _jc1, _jc2, _jc3 = st.columns(3)
-        with _jc1:
-            st.markdown(
-                '<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Role</div>'
-                f'<div style="font-size:15px;font-weight:700;color:#1A1A2E;word-wrap:break-word;">{_esc(_jd.get("role_name") or "—")}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with _jc2:
-            st.markdown(
-                '<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Company</div>'
-                f'<div style="font-size:15px;font-weight:700;color:#1A1A2E;word-wrap:break-word;">{_esc(_jd.get("company_name") or "—")}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with _jc3:
-            st.markdown(
-                '<div class="card card-slim"><div class="small-caps" style="margin-bottom:6px;">Experience Required</div>'
-                f'<div style="font-size:15px;font-weight:700;color:#1A1A2E;word-wrap:break-word;">{_esc(_jd.get("experience_required") or "—")}</div></div>',
-                unsafe_allow_html=True,
-            )
-        # Row 2: two columns — skills left, tools/responsibilities/keywords right
-        _jd_left, _jd_right = st.columns(2)
-        with _jd_left:
-            st.markdown(
-                '<div class="card" style="min-height:200px;">'
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">Must-Have Skills</div>'
-                + _jd_list_html(_jd.get("must_have_skills") or []) +
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin:14px 0 8px;">Good-to-Have Skills</div>'
-                + _jd_list_html(_jd.get("good_to_have_skills") or []) +
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin:14px 0 8px;">Soft Skills</div>'
-                + _jd_list_html(_jd.get("soft_skills") or []) +
-                '</div>',
-                unsafe_allow_html=True,
-            )
-        with _jd_right:
-            st.markdown(
-                '<div class="card" style="min-height:200px;">'
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">Tools Mentioned</div>'
-                + _jd_list_html(_jd.get("tools_mentioned") or []) +
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin:14px 0 8px;">Responsibilities</div>'
-                + _jd_list_html(_jd.get("responsibilities") or []) +
-                '<div style="font-size:12px;font-weight:700;color:#5B4CF5;letter-spacing:1px;text-transform:uppercase;margin:14px 0 8px;">Keywords Ranked</div>'
-                + _jd_list_html(_jd.get("keywords_ranked") or []) +
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# ANALYSIS PIPELINE — verbatim from appv2.py
+# ANALYSIS PIPELINE
 # Gate: analysis_complete == True
-# Single-line HTML string concatenation (Streamlit rendering constraint).
+# FIX: single-line HTML concat — was rendering as raw HTML source
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"]:
     pipe_steps = [
-        ("JD Parsed",                        "#00B894", False),
-        ("Resume Parsed",                    "#00B894", False),
-        ("Keyword Extraction",               "#00B894", False),
-        ("Gap Analysis",                     "#00B894", False),
-        ("Resume Recommendations Generated", "#5B4CF5", True),
+        ("JD Parsed",                       "#00B894", False),
+        ("Resume Parsed",                   "#00B894", False),
+        ("Keyword Extraction",              "#00B894", False),
+        ("Gap Analysis",                    "#00B894", False),
+        ("Resume Recommendations Generated","#5B4CF5", True),
     ]
     pipe_html = ""
     for i, (label, color, bold) in enumerate(pipe_steps):
@@ -830,48 +658,20 @@ if st.session_state["analysis_complete"]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# RESUME IMPROVEMENT PLAN — V3: unified section (header + chips + cards)
+# RESUME OPTIMIZATION PLAN (Actionable Improvements)
 # Gate: analysis_complete == True
-# V3 change: merged from two separate V2 blocks (priority chips were before
-# Three Column; cards were after Pipeline). Now unified after Pipeline.
-# Header renamed from "Resume Improvement Priority" to "Resume Improvement Plan".
-# Shows ALL priority_actions, no truncation.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
-    _rip_out     = st.session_state["tailoring_output"]
-    _rip_actions = _rip_out.get("priority_actions") or []
-    _rip_high    = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "High")
-    _rip_med     = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Medium")
-    _rip_low     = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Low")
+    out     = st.session_state["tailoring_output"]
+    actions = out.get("priority_actions") or []
 
-    _rip_chips = (
-        (f'<span style="background:#FFEBEE;color:#D63031;border:1px solid #FFCDD2;'
-         f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;margin-right:8px;">'
-         f'🔴 {_rip_high} High Impact</span>' if _rip_high else '') +
-        (f'<span style="background:#FFF3E0;color:#E17055;border:1px solid #FFE0B2;'
-         f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;margin-right:8px;">'
-         f'🟡 {_rip_med} Medium Impact</span>' if _rip_med else '') +
-        (f'<span style="background:#F5F5F5;color:#636E72;border:1px solid #E0E0E0;'
-         f'padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;">'
-         f'⚪ {_rip_low} Low Impact</span>' if _rip_low else '')
-    )
-
-    st.markdown(
-        '<div style="margin-top:8px;margin-bottom:4px;">'
-        '<div class="section-header">Resume Improvement Plan</div>'
-        '<div class="section-sub">Ranked by expected impact on recruiter and ATS evaluation</div>'
-        f'<div style="margin-bottom:8px;">{_rip_chips}</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-
-    for i in range(0, len(_rip_actions), 2):
-        pair = _rip_actions[i:i+2]
+    for i in range(0, len(actions), 2):
+        pair = actions[i:i+2]
         cols = st.columns(len(pair))
         for j, action in enumerate(pair):
-            lvl      = (action.get("estimated_match_score_impact") or {}).get("level","Low")
-            expl     = (action.get("estimated_match_score_impact") or {}).get("explanation","")
+            lvl   = (action.get("estimated_match_score_impact") or {}).get("level","Low")
+            expl  = (action.get("estimated_match_score_impact") or {}).get("explanation","")
             act_full = _esc(action.get("action") or "")
             with cols[j]:
                 st.markdown(
@@ -893,24 +693,22 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# AI RESUME REWRITES — verbatim from appv2.py
+# AI RESUME REWRITES (Suggested Rewrites)
 # Gate: analysis_complete == True
-# Combines: experience_section_rewrites → project_section_rewrites →
-#           professional_summary_recommendations → skills_section_recommendations
-# st.code(suggested, language=None) for native copy-to-clipboard.
+# Preserves st.code() for native copy button.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
     out      = st.session_state["tailoring_output"]
-    exp_rw    = out.get("experience_section_rewrites")              or []
-    proj_rw   = out.get("project_section_rewrites")                 or []
-    sum_recs  = out.get("professional_summary_recommendations")     or []
-    skill_recs = out.get("skills_section_recommendations")          or []
+    exp_rw   = out.get("experience_section_rewrites")  or []
+    proj_rw  = out.get("project_section_rewrites")     or []
+    sum_recs  = out.get("professional_summary_recommendations") or []
+    skill_recs = out.get("skills_section_recommendations")      or []
 
     all_rewrites = (
-        [("Experience Rewrite", r) for r in exp_rw]   +
-        [("Project Rewrite",    r) for r in proj_rw]  +
-        [("Summary Rewrite",    r) for r in sum_recs]  +
+        [("Experience Rewrite", r) for r in exp_rw]  +
+        [("Project Rewrite",    r) for r in proj_rw] +
+        [("Summary Rewrite",    r) for r in sum_recs] +
         [("Skills Rewrite",     r) for r in skill_recs]
     )
 
@@ -943,6 +741,7 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
                         unsafe_allow_html=True,
                     )
                 with col_impr:
+                    # Show improved text in readable format first
                     st.markdown(
                         '<div style="background:#F0FFF4;border:1px solid #C3E6CB;border-radius:8px;padding:16px;height:100%;">'
                         '<div style="font-size:11px;font-weight:700;color:#00B894;letter-spacing:1.2px;'
@@ -952,6 +751,7 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
                         '</div>',
                         unsafe_allow_html=True,
                     )
+                # Copy box spans below both columns — compact, reduced font via CSS
                 st.markdown(
                     '<div style="font-size:11px;color:#636E72;margin-top:10px;margin-bottom:2px;">'
                     '📋 <strong>Copy improved text</strong></div>',
@@ -969,37 +769,9 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# KEYWORD OPTIMIZATION RECOMMENDATIONS — NEW in V3 (supporting diagnostic)
-# Gate: analysis_complete == True
-# Source: tailoring_output.keyword_optimization_recommendations — ALL items
-# ═══════════════════════════════════════════════════════════════════════════
-
-if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
-    _kw_recs = (st.session_state["tailoring_output"].get("keyword_optimization_recommendations") or [])
-    if _kw_recs:
-        kw_items = "".join(
-            '<div style="display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #F4F6FB;">'
-            f'<div style="width:24px;height:24px;border-radius:50%;background:#EEF0FF;color:#5B4CF5;'
-            f'display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">{i}</div>'
-            f'<div style="font-size:14px;color:#1A1A2E;line-height:1.6;word-wrap:break-word;">{_esc(item)}</div>'
-            '</div>'
-            for i, item in enumerate(_kw_recs, start=1)
-        )
-        st.markdown(
-            '<div class="card card-purple-border">'
-            '<div class="section-header" style="margin-bottom:4px;">🔍 Keyword Optimization Recommendations</div>'
-            '<div class="section-sub">ATS-targeted keyword guidance from the tailoring engine</div>'
-            + kw_items +
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("No keyword recommendations generated.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# UNCLOSEABLE GAPS — verbatim from appv2.py
+# GAPS THAT CANNOT BE ADDRESSED
 # Gate: analysis_complete == True AND cannot_address non-empty
+# Rendered as a card with explanatory text — stronger visual weight than a warning box.
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
