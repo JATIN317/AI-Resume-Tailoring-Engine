@@ -66,6 +66,88 @@ Trigger phrases:
 - "strong experience in", "proven experience with", "hands-on experience"
 - "proficiency in", "expertise in"
 
+QUALIFIER RULE:
+When a JD introduces tools or platforms using qualifier language
+such as "such as", "like", "e.g.", "for example", "including",
+or "platforms such as" — the CATEGORY is the requirement,
+not the specific examples listed after the qualifier.
+
+Apply this rule before classifying anything as Must-Have:
+  Step 1: Identify whether the sentence uses qualifier language.
+  Step 2: If yes — extract the category (the thing before the
+           qualifier), not the examples (the things after it).
+  Step 3: Place the named examples in tools_mentioned only,
+           not in must_have_skills.
+
+Correct behaviour:
+  JD text: "Proficient in SQL, using databases such as
+            Snowflake, Redshift"
+  → must_have_skills: ["SQL"]
+  → tools_mentioned: ["SQL", "Snowflake", "Redshift"]
+
+  JD text: "experience with ticketing tools like Zendesk, JIRA"
+  → must_have_skills: ["Ticketing Tool Proficiency"] or omit if
+    experience language is not strong enough
+  → tools_mentioned: ["Zendesk", "JIRA"]
+
+  JD text: "data visualisation platforms such as Tableau, Looker"
+  → must_have_skills: ["Data Visualisation"] if visualisation is
+    strongly required, NOT "Tableau" or "Looker" individually
+  → tools_mentioned: ["Tableau", "Looker"]
+
+Wrong behaviour (do not do this):
+  → must_have_skills: ["SQL", "Snowflake", "Redshift"]
+  → must_have_skills: ["Zendesk", "JIRA"]
+
+QUALIFIER RULE — Step 4 (populate qualifier_examples):
+After extracting the category into must_have_skills or good_to_have_skills,
+record the qualifier examples in the qualifier_examples output field.
+
+  qualifier_examples is a JSON object: { "category_string": ["example1", "example2"] }
+
+KEY EXACTNESS CONSTRAINT — critical:
+  The key in qualifier_examples MUST be the EXACT string that appears in
+  must_have_skills or good_to_have_skills for that category.
+  Same capitalisation. Same wording. No paraphrasing. No abbreviation.
+  Agent 3 uses this as a direct lookup — any mismatch silently breaks matching.
+
+  CORRECT: must_have_skills contains "Ticketing Tool Proficiency"
+           qualifier_examples key is "Ticketing Tool Proficiency" ← identical
+  WRONG:   must_have_skills contains "Ticketing Tool Proficiency"
+           qualifier_examples key is "Ticketing System Proficiency" ← different wording
+
+If a must_have_skills or good_to_have_skills item was NOT derived from qualifier
+language, omit it from qualifier_examples entirely.
+If no qualifier patterns appear in the JD, output qualifier_examples as {}.
+
+CANONICAL LABEL RULE:
+When generating a category label for a must-have or good-to-have skill that
+uses qualifier language (e.g., "tools such as X, Y" or "systems like X, Y"
+or "platforms such as X, Y"), the category label MUST use the exact noun
+phrase from the JD text itself — not a paraphrase, not a synonym, not the
+wording from any example in this prompt.
+
+Example:
+  JD text: "Ticketing systems like Zendesk, JIRA"
+  CORRECT label: "Ticketing System Proficiency"
+    (uses "system" — matches JD's own word choice)
+  WRONG label: "Ticketing Tool Proficiency"
+    (uses "tool" — does not match JD's word choice,
+     even though it means the same thing)
+
+  JD text: "Databases such as Snowflake, Redshift"
+  CORRECT label: "Database Proficiency" or "SQL"
+    (matches JD's own framing)
+
+This rule exists because the category label is used as a lookup key by a
+downstream process. Consistency with the JD's own wording is more important
+than elegant phrasing. When in doubt, extract the noun directly adjacent to
+the qualifier phrase ("such as", "like") and use it verbatim in the label.
+This applies regardless of which noun the JD happens to use — "tool",
+"system", "platform", "solution", or any other term. Do not default to a
+noun seen in this prompt's own examples; always anchor to the JD in front
+of you.
+
 GOOD-TO-HAVE SKILLS
 Classify as Good-To-Have when the JD signals optionality.
 Trigger phrases:
@@ -172,7 +254,12 @@ Required fields and data types:
 
   "responsibilities": ["array of strings — max 8 items — close to original JD wording — do not creatively rewrite"],
 
-  "keywords_ranked": ["array of strings — Title Case — no duplicates — ordered most to least important"]
+  "keywords_ranked": ["array of strings — Title Case — no duplicates — ordered most to least important"],
+
+  "qualifier_examples": {
+    "Category Skill String": ["example1", "example2"],
+    "NOTES": "Object mapping each qualifier-derived must_have or good_to_have skill to its JD examples. Keys MUST exactly match the strings in must_have_skills / good_to_have_skills — same capitalisation, same wording. Omit skills not derived from qualifier language. Output empty object {} if no qualifier patterns exist in this JD."
+  }
 }
 </output_schema>
 
@@ -247,6 +334,94 @@ OUTPUT:
   ]
 }
 </few_shot_example>
+
+<few_shot_example_qualifier_rule>
+This example demonstrates the QUALIFIER RULE. It must be read
+alongside the main example above.
+
+INPUT:
+<job_description>
+We are looking for a Senior Analytics Engineer. Candidates must have
+strong proficiency in SQL, including experience with cloud databases
+such as Snowflake, BigQuery, or Redshift. Python is required for
+data pipeline automation. You will work with BI tools like Tableau
+or Looker to create executive dashboards. Experience with ticketing
+and project tracking systems such as Jira and Confluence is preferred.
+Strong communication and problem-solving skills are essential.
+</job_description>
+
+OUTPUT:
+{
+  "role_name": "Senior Analytics Engineer",
+
+  "company_name": "Unknown",
+
+  "experience_required": "Unknown",
+
+  "must_have_skills": [
+    "SQL",
+    "Python"
+  ],
+
+  "good_to_have_skills": [
+    "Ticketing System Proficiency"
+  ],
+
+  "soft_skills": [
+    "Communication",
+    "Problem Solving"
+  ],
+
+  "tools_mentioned": [
+    "SQL",
+    "Snowflake",
+    "BigQuery",
+    "Redshift",
+    "Python",
+    "Tableau",
+    "Looker",
+    "Jira",
+    "Confluence"
+  ],
+
+  "responsibilities": [
+    "Build data pipelines using Python",
+    "Create executive dashboards using BI tools"
+  ],
+
+  "keywords_ranked": [
+    "SQL",
+    "Python",
+    "Snowflake",
+    "BigQuery",
+    "Tableau",
+    "Looker",
+    "Data Pipelines",
+    "Jira",
+    "Confluence"
+  ],
+
+  "qualifier_examples": {
+    "SQL": ["Snowflake", "BigQuery", "Redshift"],
+    "Ticketing System Proficiency": ["Jira", "Confluence"]
+  }
+}
+
+ANNOTATION (explains the qualifier rule applied):
+- "databases such as Snowflake, BigQuery, or Redshift" → SQL is
+  the requirement; Snowflake/BigQuery/Redshift are examples. Only
+  SQL goes in must_have_skills. All three go in tools_mentioned.
+- "BI tools like Tableau or Looker" → BI tools is the category;
+  Tableau and Looker are examples introduced by "like". Neither
+  appears in must_have_skills (also the language is not mandatory).
+  Both appear in tools_mentioned.
+- "ticketing and project tracking systems such as Jira and Confluence"
+  → preferred, not required. Category goes in good_to_have_skills
+  as a generalised label. Jira and Confluence go in tools_mentioned.
+  Note the label uses "System" (not "Tool") because the JD itself
+  says "systems" — per the CANONICAL LABEL RULE, the label always
+  mirrors the JD's own noun choice, never a different prompt's wording.
+</few_shot_example_qualifier_rule>
 
 <router_nudge>
 Classify each skill strictly. Count keyword frequency step by step before ranking.
@@ -646,8 +821,21 @@ This task requires explicit mathematical reasoning.
 Perform all calculations internally before producing the final JSON.
 
 Calculate in this order:
-1. List every must-have skill from the JD
-2. For each: state whether it is FULL MATCH, PARTIAL MATCH, or NO MATCH
+1. List every must-have skill from the JD.
+   For each must-have skill: check jd_analysis.qualifier_examples using the
+   exact skill string as the key. If the key exists, record both the category
+   label and its qualifier examples — you will need both in Step 2.
+   If the key is not in qualifier_examples (or qualifier_examples is absent),
+   treat this as a standard skill with no examples.
+2. For each must-have skill: state whether it is FULL MATCH, PARTIAL MATCH, or NO MATCH.
+   Standard skill (no qualifier_examples entry):
+     Match against CANDIDATE TOOLS list, CANDIDATE SKILLS list,
+     and keywords_present in the resume JSON as normal.
+   Qualifier-derived skill (has qualifier_examples entry):
+     FULL MATCH if the resume contains the CATEGORY LABEL
+     OR if the resume contains ANY of the qualifier examples for that category.
+     Use the QUALIFIER CATEGORY MATCHING RULE defined in evaluation_framework.
+     The first match found (category or any example) awards FULL MATCH — no need to check further.
 3. Calculate must_have_skills_score as a percentage
 4. List every good-to-have skill from the JD
 5. For each: state whether it is FULL MATCH, PARTIAL MATCH, or NO MATCH
@@ -680,6 +868,96 @@ Do NOT apply partial match across different tools:
 
 NO MATCH (count as 0):
 The skill or tool is absent or replaced by a different tool entirely.
+
+---
+
+QUALIFIER CATEGORY MATCHING RULE:
+This rule applies to must-have skills that were derived from qualifier language
+in the JD (e.g. "databases such as Snowflake, Redshift" → category "SQL").
+Agent 1 records these in jd_analysis.qualifier_examples.
+
+NORMALIZATION INSTRUCTION:
+Before comparing a must_have_skills label against qualifier_examples
+dictionary keys, treat the comparison as case-insensitive and ignore minor
+wording variations between closely related terms (e.g., "Ticketing System
+Proficiency" and "Ticketing Tool Proficiency" should be treated as referring
+to the same category if both clearly describe ticketing/issue-tracking
+system competency). Use semantic judgment for this comparison, not strict
+string equality.
+
+If you are not confident two labels refer to the same category, default to
+treating them as the same category rather than treating them as unrelated —
+the cost of a false non-match (incorrectly penalizing a candidate who has
+the matching tool) is higher than the cost of a false match in this context,
+since the no-fabrication rule and PRECEDENCE RULE already prevent
+over-crediting fabricated skills.
+
+Lookup procedure:
+  Step 1: Take the must-have skill string (e.g. "SQL").
+  Step 2: Look it up as a key in jd_analysis.qualifier_examples using the
+          EXACT string — same capitalisation, same wording.
+  Step 3a: If the key is found → check whether the resume contains:
+           (a) the category label itself (e.g. "SQL"), OR
+           (b) ANY of the qualifier examples listed for that key
+               (e.g. "Snowflake", "Redshift", "BigQuery")
+           Check in this order:
+           (1) CANDIDATE TOOLS list in the user message,
+           (2) CANDIDATE SKILLS list in the user message,
+           (3) keywords_present field in the resume JSON.
+           These are the same data as the JSON fields — the explicit lists
+           make them easier to locate than scanning the JSON blob.
+           If (a) OR (b) is true → award FULL MATCH (count as 1.0).
+           If neither (a) nor (b) is found → NO MATCH (count as 0).
+  Step 3b: If the key is NOT found in qualifier_examples (or the field
+           is absent/empty) → fall back to standard FULL/PARTIAL/NO MATCH
+           rules using only the category label.
+
+Match value: same scale as standard matching.
+  Category label match → 1.0 (FULL MATCH)
+  Qualifier example match → 1.0 (FULL MATCH)
+  No match found → 0 (NO MATCH)
+  PARTIAL MATCH is not applicable to qualifier-derived skills — a candidate
+  either has a relevant tool/category or they do not.
+
+Example A — FULL MATCH via qualifier example:
+  JD: "ticketing systems such as JIRA or Zendesk"
+  must_have_skills: ["Ticketing Tool Proficiency"]
+  qualifier_examples: {"Ticketing Tool Proficiency": ["JIRA", "Zendesk"]}
+  Resume: contains "JIRA"
+  → Category "Ticketing Tool Proficiency" not in resume
+  → Qualifier example "JIRA" IS in resume
+  → FULL MATCH ✅
+
+Example B — FULL MATCH via category label:
+  JD: "Proficient in SQL, using databases such as Snowflake, Redshift"
+  must_have_skills: ["SQL"]
+  qualifier_examples: {"SQL": ["Snowflake", "Redshift"]}
+  Resume: contains "SQL" but not Snowflake or Redshift
+  → Category "SQL" IS in resume
+  → FULL MATCH ✅ (stop here — no need to check examples)
+
+Example C — NO MATCH:
+  Same JD as Example B. Resume: contains only "Excel".
+  → Category "SQL" not in resume
+  → Qualifier examples "Snowflake", "Redshift" not in resume
+  → NO MATCH ❌
+
+PRECEDENCE RULE — downstream gap generation:
+Once a category must-have skill is matched (via category label OR any qualifier
+example), all qualifier examples for that category are treated as satisfied for
+gap generation. Do not list qualifier examples individually in missing_skills
+or missing_keywords when the category has already matched.
+
+  CORRECT: JD has "SQL" as must-have with qualifier_examples {"SQL": ["Snowflake","Redshift"]}.
+           Resume has "Snowflake". SQL category is MATCHED via example.
+           → missing_skills does NOT include "SQL"
+           → missing_keywords does NOT include "Snowflake" or "Redshift" on behalf of SQL
+  WRONG: Resume has "Snowflake". SQL category matched.
+         → missing_skills still lists "SQL" ← contradicts the match
+         → missing_keywords lists "Snowflake" ← is already present in resume
+
+  The precedence rule prevents the contradiction of marking a skill as
+  matched in the score while simultaneously listing its examples as missing.
 
 CONSERVATIVE SCORING RULE:
 When uncertain whether a match is FULL or PARTIAL: choose PARTIAL.
@@ -918,6 +1196,88 @@ OUTPUT:
 }
 </few_shot_example>
 
+<few_shot_example_qualifier_matching>
+This example demonstrates the QUALIFIER CATEGORY MATCHING RULE and PRECEDENCE RULE
+in a complete evaluation. Read alongside the main example above.
+
+INPUT:
+<jd_analysis>
+{
+  "role_name": "Analytics Engineer",
+  "must_have_skills": ["SQL", "Ticketing Tool Proficiency"],
+  "good_to_have_skills": ["Data Visualisation"],
+  "tools_mentioned": ["SQL", "Snowflake", "Redshift", "JIRA", "Zendesk", "Tableau", "Looker"],
+  "qualifier_examples": {
+    "SQL": ["Snowflake", "Redshift"],
+    "Ticketing Tool Proficiency": ["JIRA", "Zendesk"]
+  },
+  "keywords_ranked": ["SQL", "Snowflake", "JIRA", "Data Pipelines"]
+}
+</jd_analysis>
+
+<resume_analysis>
+{
+  "skills": ["Data Pipelines", "ETL", "Dashboard Design"],
+  "tools": ["SQL", "JIRA", "Python", "dbt"],
+  "keywords_present": ["SQL", "JIRA", "Python", "Data Pipelines", "ETL"]
+}
+</resume_analysis>
+
+QUALIFIER MATCHING — chain of thought (perform internally):
+
+Must-have 1: "SQL"
+  → qualifier_examples["SQL"] = ["Snowflake", "Redshift"]
+  → CANDIDATE TOOLS contains "SQL" → FULL MATCH via category label (1.0)
+  → PRECEDENCE: Snowflake and Redshift treated as satisfied — omit from missing
+
+Must-have 2: "Ticketing Tool Proficiency"
+  → qualifier_examples["Ticketing Tool Proficiency"] = ["JIRA", "Zendesk"]
+  → "Ticketing Tool Proficiency" not in resume → check examples
+  → CANDIDATE TOOLS contains "JIRA" → FULL MATCH via qualifier example (1.0)
+  → PRECEDENCE: "Zendesk" treated as satisfied — omit from missing
+
+must_have_skills_score = (1.0 + 1.0) / 2 × 100 = 100%
+
+OUTPUT (abbreviated — focuses on qualifier-sensitive fields):
+{
+  "match_score_breakdown": {
+    "must_have_skills_score": 100,
+    "good_to_have_skills_score": 0,
+    "relevant_experience_score": 60,
+    "keyword_coverage_score": 75
+  },
+
+  "strength_areas": [
+    "SQL present — core analytics requirement met",
+    "JIRA present — satisfies Ticketing Tool Proficiency via qualifier example match"
+  ],
+
+  "missing_skills": [],
+
+  "missing_keywords": ["Snowflake"],
+
+  "weak_sections": [
+    "Good-to-have Data Visualisation tools (Tableau, Looker) absent from resume"
+  ],
+
+  "improvement_opportunities": [
+    "Snowflake appears in JD keywords — if candidate has Snowflake exposure in any project, surface it explicitly"
+  ]
+}
+
+ANNOTATION — why this output is correct:
+1. missing_skills is EMPTY even though "Ticketing Tool Proficiency" is not literally in the resume.
+   The QUALIFIER CATEGORY MATCHING RULE awards FULL MATCH via the "JIRA" example — so the category
+   is not missing.
+2. "Snowflake" appears in missing_keywords because it is a JD keyword not present in the resume.
+   This is correct: missing_keywords tracks keyword coverage (5% weight), NOT must-have skill gaps.
+   Snowflake's absence does NOT mean SQL is missing — SQL matched at the category level.
+3. "Zendesk" does NOT appear anywhere as missing — the PRECEDENCE RULE suppresses it because
+   the Ticketing Tool Proficiency category was already matched via JIRA.
+4. The score correctly reflects 100% must-have coverage despite the resume not containing
+   "Snowflake", "Redshift", "Ticketing Tool Proficiency", or "Zendesk" explicitly.
+</few_shot_example_qualifier_matching>
+
 <output_schema>
 Return ONLY a valid JSON object. No preamble. No explanation. No code fences.
 Perform all calculations internally. Think step-by-step before returning JSON.
@@ -1080,6 +1440,14 @@ You may rewrite a bullet if:
 - The rewrite improves ATS keyword visibility without changing the meaning
 - The rewrite makes impact more explicit where impact is already stated
 
+EVIDENCE DENSITY RULE:
+Preserve quantified metrics and business outcomes whenever restructuring a bullet.
+Never sacrifice evidence density for keyword placement.
+The numbers are often the strongest part of the bullet — protect them.
+WRONG: Original says "Increased efficiency by 65%" → rewrite becomes "Performed customer analysis"
+RIGHT: Keep the 65% metric. Place the keyword around it, not instead of it.
+       "Performed customer segmentation analysis, increasing operational efficiency by 65%"
+
 SURFACE BURIED SKILLS:
 If the resume explicitly names a skill in a project description but does not list it
 in the Skills section, you may recommend adding it — with the exact evidence cited.
@@ -1179,6 +1547,48 @@ Read the original bullet.
 Read the suggested rewrite.
 Ask: "Does this rewrite introduce any new factual claim?"
 If yes: remove the new claim or remove the recommendation entirely.
+
+KEYWORD RECOMMENDATION INFERENCE GATE:
+This rule applies specifically to keyword_optimization_recommendations.
+Every keyword recommendation must cite direct, named resume evidence.
+The following language patterns are PROHIBITED in keyword recommendations:
+
+  PROHIBITED PATTERNS:
+  - "imply", "suggest", "indicate", "link to", "infer"
+  - "you can imply X by linking Y to Z"
+  - "while not explicitly in your resume, you can..."
+  - "this demonstrates X" where X is not in the resume
+  - "your work on Y suggests familiarity with X"
+  - "readers can infer X from your experience with Y"
+
+  REQUIRED: Every keyword recommendation must cite the specific resume
+  section, bullet, or project that provides direct evidence for the keyword.
+
+WRONG → CORRECT example:
+
+  WRONG:
+  "While not explicitly in your resume, you can imply understanding of
+  user behavior analytics by linking your 'analyzed records' work to
+  'actionable business insights' — this suggests familiarity with
+  behavioral data interpretation."
+
+  CORRECT:
+  "Add 'Root Cause Analysis' to your Skills section — your CloudSync
+  project description explicitly states 'identified recurring failure
+  modes across 82 accounts', which is the documented output of an RCA
+  process. The evidence is already in your resume; surface the label."
+
+  WHY THE WRONG VERSION FAILS:
+  'Analyzed records' does not name user behavior analytics. Linking two
+  unrelated phrases to infer a third concept is fabrication, not tailoring.
+  An ATS or recruiter who reads both the resume and the recommendation
+  will find no direct evidence of the claimed keyword. The candidate
+  cannot defend it in an interview.
+
+  WHY THE CORRECT VERSION PASSES:
+  The recommendation cites a specific project description, quotes the
+  exact wording, and names only the label for what is already documented.
+  The candidate can point to the original text as evidence.
 </strict_constraints>
 
 <few_shot_example>
@@ -1349,9 +1759,27 @@ If any of these are present: remove them before returning the JSON.
       "action": "string — one sentence, specific and actionable.
                  For RECOVERABLE gaps: describe the rewrite.
                  For UNRECOVERABLE gaps: 'This skill is missing and cannot be added through rewording.
-                 Consider acquiring it via [course/project] before applying to roles that require it.'"
+                 Consider acquiring it via [course/project] before applying to roles that require it.'",
+      "action_type": "string (optional) — Valid values currently include:
+                     'ATS'         — improves keyword/skills match score
+                     'Positioning' — reframes existing content for better role alignment
+                     'Evidence'    — surfaces buried proof points already in the resume
+                     'Structure'   — reorders or reorganizes resume sections
+                     Omit if none of the above cleanly applies."
     }
   ],
+
+Schema validation: before returning the JSON, generate one complete
+priority_action object internally and confirm:
+  1. All existing required fields are present: priority (integer),
+     action (string), estimated_match_score_impact (object containing
+     level string and explanation string).
+  2. action_type is present as an optional string using one of the
+     valid values listed above, or omitted entirely.
+  3. No existing field has been renamed or removed.
+  4. A downstream consumer that ignores action_type will still receive
+     a valid, fully parseable priority_action object.
+If any of the four checks fail: correct the object before returning output.
 
   "professional_summary_recommendations": [
     {
@@ -1398,6 +1826,43 @@ If any of these are present: remove them before returning the JSON.
 }
 </output_schema>
 
+<schema_validation>
+Before returning your JSON, confirm the following — internally, without exposing this check:
+
+REQUIRED FIELD CHECK — every priority_action object must contain exactly these three fields:
+  {
+    "priority": <integer 1–5>,
+    "estimated_match_score_impact": {
+      "level": <"High" | "Medium" | "Low">,
+      "explanation": <string>
+    },
+    "action": <string>
+  }
+
+Confirm:
+1. "priority" is an integer, not a string.
+2. "estimated_match_score_impact" is an object with both "level" and "explanation" present.
+3. "action" is a single sentence string.
+4. No required field has been renamed, removed, or merged.
+5. Any additional fields introduced (e.g. for future versioning) are additive only —
+   they must not replace or remove the three fields above.
+
+OUTER OBJECT CHECK — the top-level JSON must contain all eight fields:
+  overall_tailoring_strategy
+  priority_actions
+  professional_summary_recommendations
+  skills_section_recommendations
+  experience_section_rewrites
+  project_section_rewrites
+  keyword_optimization_recommendations
+  cannot_address
+
+If any field is missing: add it before returning, using an empty array [] as the value.
+
+This check exists because downstream consumers parse these fields by name.
+A missing or renamed field causes a silent parse failure in the application.
+</schema_validation>
+
 <router_nudge>
 Complete all 6 planning steps internally before writing a single recommendation.
 Every rewrite must pass the truthfulness boundary check. Think step-by-step and think hard.
@@ -1422,12 +1887,20 @@ def get_agent_2_user_message(resume_text: str) -> str:
 
 def get_agent_3_user_message(jd_analysis: dict, resume_analysis: dict) -> str:
     """
-    Agent 3 user message — serialises both upstream dicts as JSON
-    and wraps each in its XML tag.
+    Agent 3 user message — serialises both upstream dicts as JSON and wraps
+    each in its XML tag. Also surfaces tools and skills as flat, explicitly
+    labelled lists so the QUALIFIER CATEGORY MATCHING RULE can locate them
+    without scanning nested JSON (P14 fix).
     """
+    _tools  = ", ".join(t for t in (resume_analysis.get("tools")  or []) if t)
+    _skills = ", ".join(s for s in (resume_analysis.get("skills") or []) if s)
     return (
         f"<jd_analysis>\n{json.dumps(jd_analysis)}\n</jd_analysis>\n\n"
-        f"<resume_analysis>\n{json.dumps(resume_analysis)}\n</resume_analysis>"
+        f"<resume_analysis>\n{json.dumps(resume_analysis)}\n</resume_analysis>\n\n"
+        f"CANDIDATE TOOLS (for qualifier matching): "
+        f"{_tools  if _tools  else 'None listed'}\n"
+        f"CANDIDATE SKILLS (for qualifier matching): "
+        f"{_skills if _skills else 'None listed'}"
     )
 
 

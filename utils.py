@@ -76,7 +76,31 @@ def parse_llm_json(raw_text: str) -> dict:
     """
     text = raw_text.strip()
 
-    # Pass 1: prefer content inside a code fence if one exists
+    # PRE-PASS — strip opening fence even when no closing fence is present.
+    # Root cause: Agent 4's large output can be truncated mid-generation,
+    # producing a response that opens with ```json but never writes the
+    # closing ```. Without this pre-pass, _FENCE_RE requires both delimiters,
+    # so it returns no match, and json.loads receives the raw ```json header
+    # text — failing immediately at char 0 ("Expecting value: line 1 column 1").
+    # With this pre-pass, the header line is stripped first; if the closing
+    # fence is also present, Pass 1 below is skipped (no fence left to match)
+    # and Pass 3's brace extraction recovers the JSON cleanly. If the response
+    # is truncated (no closing fence), Pass 3 still attempts brace extraction
+    # on whatever valid JSON was generated before truncation.
+    if text.startswith("```"):
+        # Strip only the opening fence line (```json or ``` or ```JSON, etc.)
+        lines = text.split("\n", 1)
+        if len(lines) > 1:
+            text = lines[1].strip()
+        else:
+            # Single-line edge case: ```json{...} with no newline
+            text = text.lstrip("`").lstrip("json").lstrip("JSON").strip()
+
+    # Pass 1: prefer content inside a code fence if one exists.
+    # If the response was fully fenced and pre-pass stripped the opener,
+    # the closing ``` remains as a trailing suffix — Pass 3's brace
+    # extraction will trim it. If pre-pass did not fire (non-fenced
+    # response), Pass 1 handles embedded fences as before.
     fence_match = _FENCE_RE.search(text)
     if fence_match:
         text = fence_match.group(1).strip()
@@ -165,7 +189,7 @@ def retry_llm_call(
         # app.py catches these and shows the appropriate user-facing message.
         response = model.generate_content(
             contents=[{"role": "user", "parts": [{"text": user_message}]}],
-            generation_config={"temperature": 0},  # mandatory — all 4 agents
+            generation_config={"temperature": 0, "max_output_tokens": 16384},  # raised from 8192 → 16384; Gemini 2.5 Flash supports up to 65 536 output tokens; secondary safeguard against Agent 4 truncation (primary fix is parse_llm_json pre-pass above)
         )
         raw_text = response.text
         _debug(agent_name, f"Raw response ({len(raw_text)} chars): {raw_text[:200]}...")

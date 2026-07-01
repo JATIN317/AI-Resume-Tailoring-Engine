@@ -11,6 +11,7 @@
 
 from dotenv import load_dotenv
 import streamlit as st
+import contextlib
 from agents import (
     run_agent_1, run_agent_2, run_agent_3, run_agent_4,
     LLMParseError, LLMValidationError,
@@ -78,6 +79,84 @@ def _est_chip(level: str) -> str:
     pct = _impact_pct(level)
     return (f'<span style="background:#F0FFF4;color:#00B894;font-size:11px;font-weight:700;'
             f'padding:3px 10px;border-radius:10px;">↑ Est. +{pct}%</span>')
+
+def _simulator_eligible_actions(actions: list) -> list:
+    """
+    Fix 2 (P03) — Allow-list filter for Match Score Simulator eligibility.
+
+    Forward-compatible by design: action_type is an open enum (V4+ may add
+    new values). An ALLOW-LIST is used rather than a block-list so that any
+    future action_type NOT explicitly approved here is excluded by default,
+    rather than silently included.
+
+    Filtering order:
+      1. action_type present AND in ALLOWED  -> eligible
+      2. action_type present AND NOT in ALLOWED -> excluded
+      3. action_type absent entirely (e.g. older cached responses) ->
+         fall back to text-signal filtering on the action string
+    Eligible actions are then sorted by priority ascending (1 = highest
+    impact) before the caller takes the top 3 — sorting happens here so
+    every caller gets a correctly-ordered list regardless of the LLM's
+    original array order.
+    """
+    ALLOWED = {"ATS", "Match", "Evidence"}
+    _exclude_signals = ["date", "typo", "correct the", "formatting", "future date"]
+
+    eligible = []
+    for a in actions or []:
+        a_type = a.get("action_type")
+        if a_type is not None:
+            if a_type in ALLOWED:
+                eligible.append(a)
+            # else: present but not allow-listed -> excluded, no further check
+        else:
+            action_text = (a.get("action") or "").lower()
+            if not any(sig in action_text for sig in _exclude_signals):
+                eligible.append(a)
+
+    # Sort ascending by priority (1 = highest impact). Items missing a
+    # priority field sort last (treated as lowest priority = 999).
+    eligible_sorted = sorted(eligible, key=lambda a: a.get("priority", 999))
+    return eligible_sorted
+
+def _score_aware_filter(actions: list, match_score) -> list:
+    """
+    Fix 3 Rule A (P11/FD01) — Score-aware filtering for Resume Improvement Plan.
+
+    match_score >= 85 (strong match):
+      Show all High-impact items. If zero High items exist, fall back to
+      the single highest-priority Medium item so the section is never
+      rendered empty.
+    All other scores (Rule C, 31-84% and below):
+      No filtering — return actions unchanged, preserving current behavior.
+    """
+    try:
+        score = int(match_score or 0)
+    except (TypeError, ValueError):
+        score = 0
+
+    if score < 85:
+        return actions  # Rule C — unchanged behavior
+
+    high_items = [
+        a for a in actions
+        if (a.get("estimated_match_score_impact") or {}).get("level", "Low") == "High"
+    ]
+    if high_items:
+        return high_items
+
+    medium_items = [
+        a for a in actions
+        if (a.get("estimated_match_score_impact") or {}).get("level", "Low") == "Medium"
+    ]
+    if medium_items:
+        best_medium = min(medium_items, key=lambda a: a.get("priority", 999))
+        return [best_medium]
+
+    # No High and no Medium items exist — return actions unchanged rather
+    # than producing an empty list (preserves the "never empty" guarantee
+    # at the level of "don't filter away everything that exists").
+    return actions
 
 def _get_verified_chips(gap: dict) -> str:
     """Cross-reference JD must-haves with resume keywords for concise chip labels."""
@@ -368,6 +447,17 @@ if uploaded_file is not None:
             st.session_state[_reset_key] = None
         st.session_state["analysis_complete"] = False
         st.session_state["uploaded_filename"] = new_sig
+        # Fix P08: trigger an explicit controlled rerun now that all mutations
+        # are complete. Without this, Streamlit's implicit auto-rerun fires at
+        # the END of the current run — meaning Run A already painted the Step
+        # Progress Bar and Input section before the rerun begins, causing the
+        # user to see two stacked input renders. st.rerun() aborts Run A's
+        # partial output immediately and restarts cleanly; Run B starts with
+        # analysis_complete=False so the Progress Bar is skipped and the
+        # Input section renders exactly once.
+        # Nothing follows this statement inside the if-block — st.rerun()
+        # raises an exception that halts script execution immediately.
+        st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -539,7 +629,10 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
     # V3 addition: Experience Gap Detail collapsed expander
     # Shows all four experience_gap fields (required, candidate, severity, reason).
     exp_gap = (st.session_state.get("gap_analysis") or {}).get("experience_gap") or {}
-    if exp_gap and any(v for v in exp_gap.values() if v is not None and str(v).strip() not in ("", "false", "False")):
+    # Fix P04: check only the four meaningful text fields, not all dict values.
+    # Avoids showing empty expander when only the boolean "gap" field is present.
+    if any([exp_gap.get("required"), exp_gap.get("candidate"),
+            exp_gap.get("severity"), exp_gap.get("reason")]):
         with st.expander("📊 Experience Gap Detail", expanded=False):
             sev_val = str(exp_gap.get("severity") or "None")
             sev_color = {"High": "#D63031", "Medium": "#E17055", "Low": "#00B894", "None": "#00B894"}.get(sev_val, "#636E72")
@@ -583,72 +676,82 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
         _gap_sim = st.session_state["gap_analysis"] or {}
         _out_sim = st.session_state["tailoring_output"] or {}
         _base    = _gap_sim.get("match_score", 0)
-        _top3    = (_out_sim.get("priority_actions") or [])[:3]
+        # Fix 2 (P03): allow-list filter by action_type, sorted by priority
+        # ascending, before taking the top 3. See _simulator_eligible_actions().
+        _eligible_actions = _simulator_eligible_actions(_out_sim.get("priority_actions") or [])
+        _top3    = _eligible_actions[:3]
 
-        # Heuristic only: High → +4%, Medium → +2%, Low → +1%
-        # These are priority estimates, not model predictions.
-        _impact_data = []
-        for _a in _top3:
-            _lvl   = (_a.get("estimated_match_score_impact") or {}).get("level", "Low")
-            _pct   = _impact_pct(_lvl)
-            _label = (_a.get("action") or "")[:22].strip()
-            _impact_data.append((_label, _pct, _lvl))
+        # Fix P04: guard against empty or missing priority_actions
+        if not _top3:
+            st.caption("Insufficient recommendations to generate simulator.")
+        else:
+            try:
+                # Heuristic only: High → +4%, Medium → +2%, Low → +1%
+                # These are priority estimates, not model predictions.
+                _impact_data = []
+                for _a in _top3:
+                    _lvl   = (_a.get("estimated_match_score_impact") or {}).get("level", "Low")
+                    _pct   = _impact_pct(_lvl)
+                    _label = (_a.get("action") or "")[:22].strip()
+                    _impact_data.append((_label, _pct, _lvl))
 
-        _total_gain = sum(p for _, p, _ in _impact_data)
-        _projected  = min(_base + _total_gain, 99)
-        _remaining  = max(100 - _base - _total_gain, 0)
-        _seg_colors = ["#7B6CF8", "#00B894", "#E17055"]
+                _total_gain = sum(p for _, p, _ in _impact_data)
+                _projected  = min(_base + _total_gain, 99)
+                _remaining  = max(100 - _base - _total_gain, 0)
+                _seg_colors = ["#7B6CF8", "#00B894", "#E17055"]
 
-        _bar_segs = (
-            f'<div style="flex:{_base};background:#5B4CF5;display:flex;align-items:center;'
-            f'justify-content:center;color:white;font-size:12px;font-weight:700;min-width:4px;">'
-            + (f"{_base}%" if _base > 8 else "") + '</div>'
-        )
-        _lbl_segs = (
-            f'<div style="flex:{_base};padding-top:4px;">'
-            f'<span style="font-size:11px;color:#636E72;font-weight:600;">Current: {_base}%</span></div>'
-        )
+                _bar_segs = (
+                    f'<div style="flex:{_base};background:#5B4CF5;display:flex;align-items:center;'
+                    f'justify-content:center;color:white;font-size:12px;font-weight:700;min-width:4px;">'
+                    + (f"{_base}%" if _base > 8 else "") + '</div>'
+                )
+                _lbl_segs = (
+                    f'<div style="flex:{_base};padding-top:4px;">'
+                    f'<span style="font-size:11px;color:#636E72;font-weight:600;">Current: {_base}%</span></div>'
+                )
 
-        for _i, (_label, _pct, _lvl) in enumerate(_impact_data):
-            _col = _seg_colors[_i % len(_seg_colors)]
-            _bar_segs += (
-                f'<div style="flex:{_pct};background:{_col};display:flex;align-items:center;'
-                f'justify-content:center;border-left:1px solid rgba(255,255,255,0.4);'
-                f'color:white;font-size:11px;font-weight:700;min-width:4px;">'
-                + (f"+{_pct}%" if _pct > 1 else "") + '</div>'
-            )
-            _lbl_segs += (
-                f'<div style="flex:{_pct};text-align:center;padding-top:4px;">'
-                f'<div style="font-size:10px;color:#636E72;white-space:nowrap;'
-                f'overflow:hidden;text-overflow:ellipsis;max-width:90px;margin:0 auto;">{_esc(_label)}</div>'
-                f'<div style="font-size:11px;color:{_col};font-weight:700;">+{_pct}%</div>'
-                f'</div>'
-            )
-        if _remaining > 0:
-            _bar_segs += f'<div style="flex:{_remaining};background:#E8ECF0;min-width:4px;"></div>'
-            _lbl_segs += f'<div style="flex:{_remaining};"></div>'
-        _bar_segs += (
-            f'<div style="width:56px;background:#2D2A70;display:flex;align-items:center;'
-            f'justify-content:center;color:white;font-size:13px;font-weight:700;flex-shrink:0;">'
-            f'{_projected}%</div>'
-        )
+                for _i, (_label, _pct, _lvl) in enumerate(_impact_data):
+                    _col = _seg_colors[_i % len(_seg_colors)]
+                    _bar_segs += (
+                        f'<div style="flex:{_pct};background:{_col};display:flex;align-items:center;'
+                        f'justify-content:center;border-left:1px solid rgba(255,255,255,0.4);'
+                        f'color:white;font-size:11px;font-weight:700;min-width:4px;">'
+                        + (f"+{_pct}%" if _pct > 1 else "") + '</div>'
+                    )
+                    _lbl_segs += (
+                        f'<div style="flex:{_pct};text-align:center;padding-top:4px;">'
+                        f'<div style="font-size:10px;color:#636E72;white-space:nowrap;'
+                        f'overflow:hidden;text-overflow:ellipsis;max-width:90px;margin:0 auto;">{_esc(_label)}</div>'
+                        f'<div style="font-size:11px;color:{_col};font-weight:700;">+{_pct}%</div>'
+                        f'</div>'
+                    )
+                if _remaining > 0:
+                    _bar_segs += f'<div style="flex:{_remaining};background:#E8ECF0;min-width:4px;"></div>'
+                    _lbl_segs += f'<div style="flex:{_remaining};"></div>'
+                _bar_segs += (
+                    f'<div style="width:56px;background:#2D2A70;display:flex;align-items:center;'
+                    f'justify-content:center;color:white;font-size:13px;font-weight:700;flex-shrink:0;">'
+                    f'{_projected}%</div>'
+                )
 
-        st.markdown(
-            '<div class="card" style="margin-top:4px;">'
-            '<div class="section-header" style="margin-bottom:4px;">Match Score Simulator</div>'
-            '<div class="section-sub" style="margin-bottom:8px;">Estimated score impact of applying top recommendations</div>'
-            # Heuristic disclaimer — visible to user, per adjusted spec requirement
-            '<div style="font-size:12px;color:#E17055;font-style:italic;margin-bottom:16px;">'
-            'Estimated impact based on recommendation priority. Not a predictive model.</div>'
-            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
-            f'<span style="font-size:13px;color:#636E72;font-weight:600;">Current: {_base}%</span>'
-            f'<span style="font-size:13px;color:#00B894;font-weight:700;">Projected: {_projected}%</span>'
-            '</div>'
-            f'<div style="display:flex;width:100%;height:44px;border-radius:8px;overflow:hidden;margin-bottom:6px;">{_bar_segs}</div>'
-            f'<div style="display:flex;width:100%;">{_lbl_segs}</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+                st.markdown(
+                    '<div class="card" style="margin-top:4px;">'
+                    '<div class="section-header" style="margin-bottom:4px;">Match Score Simulator</div>'
+                    '<div class="section-sub" style="margin-bottom:8px;">Estimated score impact of applying top recommendations</div>'
+                    # Heuristic disclaimer — visible to user, per adjusted spec requirement
+                    '<div style="font-size:12px;color:#E17055;font-style:italic;margin-bottom:16px;">'
+                    'Estimated impact based on recommendation priority. Not a predictive model.</div>'
+                    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">'
+                    f'<span style="font-size:13px;color:#636E72;font-weight:600;">Current: {_base}%</span>'
+                    f'<span style="font-size:13px;color:#00B894;font-weight:700;">Projected: {_projected}%</span>'
+                    '</div>'
+                    f'<div style="display:flex;width:100%;height:44px;border-radius:8px;overflow:hidden;margin-bottom:6px;">{_bar_segs}</div>'
+                    f'<div style="display:flex;width:100%;">{_lbl_segs}</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception as _sim_err:
+                st.caption(f"Simulator could not render: {_sim_err}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -839,8 +942,13 @@ if st.session_state["analysis_complete"]:
 # ═══════════════════════════════════════════════════════════════════════════
 
 if st.session_state["analysis_complete"] and st.session_state["tailoring_output"] is not None:
-    _rip_out     = st.session_state["tailoring_output"]
-    _rip_actions = _rip_out.get("priority_actions") or []
+    _rip_out         = st.session_state["tailoring_output"]
+    _rip_match_score = (st.session_state["gap_analysis"] or {}).get("match_score", 0)
+    _rip_all_actions = _rip_out.get("priority_actions") or []
+    # Fix 3 Rule A (P11/FD01): score-aware filtering for strong matches (>=85).
+    # Falls back to single highest-priority Medium item if no High items exist.
+    # Rule C (31-84%): _score_aware_filter returns actions unchanged.
+    _rip_actions = _score_aware_filter(_rip_all_actions, _rip_match_score)
     _rip_high    = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "High")
     _rip_med     = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Medium")
     _rip_low     = sum(1 for a in _rip_actions if (a.get("estimated_match_score_impact") or {}).get("level","Low") == "Low")
@@ -865,6 +973,14 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
         '</div>',
         unsafe_allow_html=True,
     )
+
+    # Fix 3 Rule A: caption shown only when the strong-match filter is active.
+    try:
+        _rip_score_int = int(_rip_match_score or 0)
+    except (TypeError, ValueError):
+        _rip_score_int = 0
+    if _rip_score_int >= 85:
+        st.caption("Strong match detected — showing high-impact optimizations only.")
 
     for i in range(0, len(_rip_actions), 2):
         pair = _rip_actions[i:i+2]
@@ -914,58 +1030,93 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
         [("Skills Rewrite",     r) for r in skill_recs]
     )
 
+    # Fix 3 Rule B (P11/FD02): domain mismatch detection.
+    # match_score <= 30 AND cannot_address has 3+ items signals the role is
+    # likely outside the candidate's domain — rewrites have limited ability
+    # to close that gap. Section is collapsed, not hidden, for transparency.
+    _rw_match_score = (st.session_state["gap_analysis"] or {}).get("match_score", 0)
+    try:
+        _rw_score_int = int(_rw_match_score or 0)
+    except (TypeError, ValueError):
+        _rw_score_int = 0
+    _rw_cannot_addr_count = len(out.get("cannot_address") or [])
+    _domain_mismatch = _rw_score_int <= 30 and _rw_cannot_addr_count >= 3
+
     if all_rewrites:
-        st.markdown(
-            '<div style="margin-top:8px;">'
-            '<div class="section-header">AI Resume Rewrites</div>'
-            '<div class="section-sub">Copy the improved version directly into your resume</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        if _domain_mismatch:
+            # Fix P13: explicit vertical break before st.warning() — the
+            # Resume Improvement Plan cards above carry box-shadow (8px blur)
+            # and position:relative, which creates a stacking context whose
+            # shadow visually bleeds into native Streamlit widgets that
+            # immediately follow. 24px clears the shadow radius with margin.
+            st.markdown('<div style="margin-top:24px;"></div>', unsafe_allow_html=True)
+            st.warning(
+                "⚠️ Major domain mismatch detected. Resume tailoring has "
+                "limited ability to close this gap — see 'Gaps That Cannot "
+                "Be Closed' above. Rewrites are shown below for transparency."
+            )
+            st.markdown(
+                '<div style="margin-top:8px;">'
+                '<div class="section-header">AI Resume Rewrites</div>'
+                '<div class="section-sub">Copy the improved version directly into your resume</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            _rewrite_container = st.expander("View Resume Rewrites Anyway", expanded=False)
+        else:
+            st.markdown(
+                '<div style="margin-top:8px;">'
+                '<div class="section-header">AI Resume Rewrites</div>'
+                '<div class="section-sub">Copy the improved version directly into your resume</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            _rewrite_container = contextlib.nullcontext()
 
-        for idx, (kind, rw) in enumerate(all_rewrites, start=1):
-            original  = rw.get("original","")
-            suggested = rw.get("suggested","")
-            reason    = rw.get("reason","")
-            expanded  = idx <= 2
+        with _rewrite_container:
+            for idx, (kind, rw) in enumerate(all_rewrites, start=1):
+                original  = rw.get("original","")
+                suggested = rw.get("suggested","")
+                reason    = rw.get("reason","")
+                expanded  = idx <= 2 and not _domain_mismatch
 
-            with st.expander(f"📝 {kind} {idx}", expanded=expanded):
-                col_orig, col_impr = st.columns(2)
-                with col_orig:
-                    orig_body = _esc(original) if original else "<em style='color:#9B9B9B;'>None present</em>"
+                with st.expander(f"📝 {kind} {idx}", expanded=expanded):
+                    col_orig, col_impr = st.columns(2)
+                    with col_orig:
+                        orig_body = _esc(original) if original else "<em style='color:#9B9B9B;'>None present</em>"
+                        st.markdown(
+                            '<div style="background:#F8F9FA;border:1px solid #E8ECF0;border-radius:8px;padding:16px;height:100%;">'
+                            '<div style="font-size:11px;font-weight:700;color:#9B9B9B;letter-spacing:1.2px;'
+                            'text-transform:uppercase;margin-bottom:10px;">Current Resume</div>'
+                            f'<div style="font-size:13px;color:#2D3436;line-height:1.7;word-wrap:break-word;">'
+                            f'{orig_body}</div>'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
+                    with col_impr:
+                        st.markdown(
+                            '<div style="background:#F0FFF4;border:1px solid #C3E6CB;border-radius:8px;padding:16px;height:100%;">'
+                            '<div style="font-size:11px;font-weight:700;color:#00B894;letter-spacing:1.2px;'
+                            'text-transform:uppercase;margin-bottom:10px;">AI Improved Version</div>'
+                            f'<div style="font-size:13px;color:#2D3436;line-height:1.7;word-wrap:break-word;">'
+                            f'{_esc(suggested) if suggested else "<em style=\"color:#9B9B9B;\">No suggestion available</em>"}</div>'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
                     st.markdown(
-                        '<div style="background:#F8F9FA;border:1px solid #E8ECF0;border-radius:8px;padding:16px;height:100%;">'
-                        '<div style="font-size:11px;font-weight:700;color:#9B9B9B;letter-spacing:1.2px;'
-                        'text-transform:uppercase;margin-bottom:10px;">Current Resume</div>'
-                        f'<div style="font-size:13px;color:#2D3436;line-height:1.7;word-wrap:break-word;">'
-                        f'{orig_body}</div>'
-                        '</div>',
+                        '<div style="font-size:11px;color:#636E72;margin-top:10px;margin-bottom:2px;">'
+                        '📋 <strong>Copy improved text</strong></div>',
                         unsafe_allow_html=True,
                     )
-                with col_impr:
-                    st.markdown(
-                        '<div style="background:#F0FFF4;border:1px solid #C3E6CB;border-radius:8px;padding:16px;height:100%;">'
-                        '<div style="font-size:11px;font-weight:700;color:#00B894;letter-spacing:1.2px;'
-                        'text-transform:uppercase;margin-bottom:10px;">AI Improved Version</div>'
-                        f'<div style="font-size:13px;color:#2D3436;line-height:1.7;word-wrap:break-word;">'
-                        f'{_esc(suggested) if suggested else "<em style=\"color:#9B9B9B;\">No suggestion available</em>"}</div>'
-                        '</div>',
-                        unsafe_allow_html=True,
-                    )
-                st.markdown(
-                    '<div style="font-size:11px;color:#636E72;margin-top:10px;margin-bottom:2px;">'
-                    '📋 <strong>Copy improved text</strong></div>',
-                    unsafe_allow_html=True,
-                )
-                st.code(suggested or "", language=None)
-                if reason:
-                    st.markdown(
-                        f'<div style="background:#FFFDF0;border-left:3px solid #F4D03F;'
-                        f'border-radius:0 4px 4px 0;padding:10px 14px;margin-top:8px;'
-                        f'font-size:13px;color:#2D3436;line-height:1.6;">'
-                        f'💡 <strong style="color:#636E72;">Why this works:</strong> {_esc(reason)}</div>',
-                        unsafe_allow_html=True,
-                    )
+                    st.code(suggested or "", language=None)
+                    if reason:
+                        st.markdown(
+                            f'<div style="background:#FFFDF0;border-left:3px solid #F4D03F;'
+                            f'border-radius:0 4px 4px 0;padding:10px 14px;margin-top:8px;'
+                            f'font-size:13px;color:#2D3436;line-height:1.6;">'
+                            f'💡 <strong style="color:#636E72;">Why this works:</strong> {_esc(reason)}</div>',
+                            unsafe_allow_html=True,
+                        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1023,3 +1174,4 @@ if st.session_state["analysis_complete"] and st.session_state["tailoring_output"
             '</div>',
             unsafe_allow_html=True,
         )
+
